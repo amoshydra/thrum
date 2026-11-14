@@ -210,6 +210,9 @@ sinkrill retune
 # What the running instance is doing
 sinkrill status
 
+# Live panel: volume, mute, play/pause, retune
+sinkrill tui
+
 # Serve only: prints the URL to paste into the Sonos app
 sinkrill --no-tune
 
@@ -333,12 +336,47 @@ process, removes the virtual device, and exits.
 |------|-----|
 | Start / stop | `sinkrill --virtual-sink` / `Ctrl+C` (or `sinkrill stop "Living Room"`) |
 | Volume | `sinkrill volume 40` while running, `sinkrill volume +5` / `mute`, or `--volume 40` on start |
+| Panel | `sinkrill tui` — live volume, mute, play/pause, stop, and re-tune for the room |
 | Re-tune | `sinkrill retune` — points the room back at the running stream, e.g. after another device took it |
 | Leftovers | `sinkrill cleanup` — removes the output device and stray capture process after a `kill -9` or crash |
-| Pause / resume | Sonos app; long pauses may drop the stream connection, then restart `sinkrill` (or run with `--keepalive`) |
+| Pause / resume | The panel, or the Sonos app; long pauses may drop the stream connection, then restart `sinkrill` (or run with `--keepalive`) |
 | Change room | stop, then `sinkrill "Other Room" --virtual-sink` |
 | Inspect | `sinkrill status` (or `curl http://<lan-ip>:8567/status`) |
 | Preview | open `http://<lan-ip>:8567/stream.wav` in VLC or a browser |
+
+### Control panel
+
+`sinkrill tui` opens a small live panel in a second terminal while the stream
+runs. It follows the local instance, so it shows capture health and buffering
+next to the room's state:
+
+```text
+ sinkrill  homedesktop streaming audio
+ -------------------------------------------------------------------------
+  Room      Den
+  State     playing
+  Playing   this stream
+  Volume    [====================    ]  82
+  Stream    wav, 1536 kbps
+  Capture   running, last data 19 ms ago, 0 restarts
+  Buffer    0 B queued, 0 dropped, 1 listener
+ -------------------------------------------------------------------------
+  up/down 2   left/right 10   m mute   space play/pause   s stop
+  r retune    n/b track       q quit
+  ready
+```
+
+`up`/`down` nudge the volume by 2, `left`/`right` by 10 (`+`, `-`, `[`, `]`
+do the same). `n`/`b` skip within the room's queue, which only does something
+when the room is playing an album or playlist rather than this stream. `r`
+points the room back at this stream, the same as `sinkrill retune`. `q`, `Esc`,
+and `Ctrl+C` all leave the panel; the stream keeps running.
+
+The panel talks to the room directly, so it works while `sinkrill` is started
+from another terminal, a service, or with `--no-tune` (then pass
+`--device <ip>`). It never changes the stream itself — formatting, capture, and
+port stay as the running instance set them.
+
 
 ## Run as a user service
 

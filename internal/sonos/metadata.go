@@ -51,3 +51,13 @@ func WAVMetadata(title, uri, artist string) string {
 		`RINCON_AssociatedZPUDN</desc>` +
 		`</item></DIDL-Lite>`
 }
+
+// StreamMetadata rebuilds the DIDL-Lite payload a sinkrill instance sent, so a
+// second command can re-tune the room to the same stream. The format decides
+// the advertised scheme; both use the station as the title.
+func StreamMetadata(format, station, uri string) string {
+	if format == "wav" {
+		return WAVMetadata(station, uri, "Sinkrill")
+	}
+	return RadioMetadata(station, "Sinkrill")
+}

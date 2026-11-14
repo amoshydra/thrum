@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
 	"regexp"
@@ -22,6 +21,7 @@ import (
 	"github.com/amoshydra/sinkrill/internal/probe"
 	"github.com/amoshydra/sinkrill/internal/sink"
 	"github.com/amoshydra/sinkrill/internal/sonos"
+	"github.com/amoshydra/sinkrill/internal/tui"
 	"github.com/amoshydra/sinkrill/internal/virtualsink"
 )
 
@@ -52,6 +52,8 @@ func run(argv []string) int {
 		return runVolume(args)
 	case "retune":
 		return runRetune(args)
+	case "tui":
+		return runTUI(args)
 	case "cleanup":
 		return runCleanup(args)
 	case "status":
@@ -70,7 +72,7 @@ func splitCommand(argv []string) (string, []string) {
 		return "start", nil
 	}
 	switch argv[0] {
-	case "start", "devices", "stop", "volume", "retune", "cleanup", "status", "probe", "doctor", "version", "help":
+	case "start", "devices", "stop", "volume", "retune", "cleanup", "status", "tui", "probe", "doctor", "version", "help":
 		return argv[0], argv[1:]
 	case "-h", "--help":
 		return "help", nil
@@ -110,6 +112,7 @@ Usage:
   sinkrill retune [options]           Point the speaker back at the running stream
   sinkrill cleanup                    Remove a leftover output device after a crash
   sinkrill status                     Show what the running instance is doing
+  sinkrill tui [options]              Control the room from a live panel
   sinkrill doctor [options]           Diagnose silence, capture, and routing
   sinkrill probe [options]            Measure buffered latency
   sinkrill version                    Print the version
@@ -343,26 +346,10 @@ func clampVolume(v int) int {
 
 // localStatus reads /status from a running instance. It is used to reuse the
 // room that instance is already tuned to, instead of rediscovering it.
+// localStatus is the CLI's view of a running instance; the panel uses the same
+// helper, so both agree on what counts as "an instance is running".
 func localStatus(port int) (*sink.Status, bool) {
-	client := &http.Client{Timeout: 700 * time.Millisecond}
-	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/status", port))
-	if err != nil {
-		return nil, false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, false
-	}
-	var st sink.Status
-	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
-		return nil, false
-	}
-	// Another service could return valid JSON on this path; require the fields
-	// a real instance always reports.
-	if st.Station == "" {
-		return nil, false
-	}
-	return &st, true
+	return sink.LocalStatus(port)
 }
 
 // resolveTarget picks the room to act on: an explicit --device, else whatever
@@ -457,10 +444,7 @@ func runVolume(args []string) int {
 // streamMetadata rebuilds the DIDL-Lite payload the running instance used, so
 // a manual retune looks identical to the original tune-in.
 func streamMetadata(format, station, uri string) string {
-	if format == "wav" {
-		return sonos.WAVMetadata(station, uri, "Sinkrill")
-	}
-	return sonos.RadioMetadata(station, "Sinkrill")
+	return sonos.StreamMetadata(format, station, uri)
 }
 
 // runRetune points a speaker back at an already running stream. It is the
@@ -560,6 +544,42 @@ func runCleanup(args []string) int {
 		return 0
 	}
 	log.Infof("removed leftover output device %q", name)
+	return 0
+}
+
+// runTUI controls the room and the running instance from a live panel.
+func runTUI(args []string) int {
+	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
+	device := ""
+	port := 8567
+	strVar(fs, &device, "device", "d", "", "Sonos room name or IP")
+	intVar(fs, &port, "port", "p", port, "port of the running instance")
+	verbose := boolVar(fs, nil, "verbose", "v", false, "verbose logging")
+
+	if code, ok := parseFlags(fs, args); !ok {
+		return code
+	}
+
+	log := logx.New(*verbose)
+	ctx, stop := signalContext()
+	defer stop()
+
+	dev, err := resolveTarget(ctx, device, port, log)
+	if err != nil {
+		log.Errorf("%v", err)
+		return 1
+	}
+
+	local, _ := localStatus(port)
+	if err := tui.Run(ctx, tui.Options{
+		Room:   dev.Name,
+		Device: dev.IP,
+		Port:   port,
+		Local:  local,
+	}); err != nil {
+		log.Errorf("%v", err)
+		return 1
+	}
 	return 0
 }
 

@@ -104,6 +104,29 @@ func (c *Client) Stop(ctx context.Context) error {
 	return err
 }
 
+func (c *Client) Pause(ctx context.Context) error {
+	_, err := c.call(ctx, avTransportService, "Pause", [][2]string{
+		{"InstanceID", "0"},
+	})
+	return err
+}
+
+// Next and Previous skip within the room's queue. A radio stream has nowhere
+// to skip to, so they are only useful when the room is playing something else.
+func (c *Client) Next(ctx context.Context) error {
+	_, err := c.call(ctx, avTransportService, "Next", [][2]string{
+		{"InstanceID", "0"},
+	})
+	return err
+}
+
+func (c *Client) Previous(ctx context.Context) error {
+	_, err := c.call(ctx, avTransportService, "Previous", [][2]string{
+		{"InstanceID", "0"},
+	})
+	return err
+}
+
 type transportInfoResponse struct {
 	State string `xml:"Body>GetTransportInfoResponse>CurrentTransportState"`
 }
