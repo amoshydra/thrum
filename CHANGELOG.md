@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/amoshydra/sinkrill/compare/v0.3.1...v0.3.2) (2026-11-14)
+
+
+### Features
+
+* let the panel start the stream it is watching ([73b2006](https://github.com/amoshydra/sinkrill/commit/73b2006b2519a650653d81f2bdf1e4543893cc23))
+
 ## [0.3.1](https://github.com/amoshydra/sinkrill/compare/v0.3.0...v0.3.1) (2026-11-14)
 
 
