@@ -20,6 +20,13 @@ func New(verbose bool) *Logger {
 	return &Logger{out: os.Stdout, err: os.Stderr, verbose: verbose}
 }
 
+// NewTo returns a logger that writes everything to w. The control panel uses
+// this: it owns the terminal, so log lines have to be captured and drawn
+// inside the panel rather than printed over it.
+func NewTo(w io.Writer, verbose bool) *Logger {
+	return &Logger{out: w, err: w, verbose: verbose}
+}
+
 // NewSilent discards all output (used in tests).
 func NewSilent() *Logger {
 	return &Logger{out: io.Discard, err: io.Discard}

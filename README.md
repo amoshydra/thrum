@@ -213,6 +213,9 @@ sinkrill status
 # Live panel: volume, mute, play/pause, retune
 sinkrill tui
 
+# Panel and stream in one command
+sinkrill tui "Living Room" --virtual-sink
+
 # Serve only: prints the URL to paste into the Sonos app
 sinkrill --no-tune
 
@@ -336,7 +339,7 @@ process, removes the virtual device, and exits.
 |------|-----|
 | Start / stop | `sinkrill --virtual-sink` / `Ctrl+C` (or `sinkrill stop "Living Room"`) |
 | Volume | `sinkrill volume 40` while running, `sinkrill volume +5` / `mute`, or `--volume 40` on start |
-| Panel | `sinkrill tui` — live volume, mute, play/pause, stop, and re-tune for the room |
+| Panel | `sinkrill tui` — live volume, mute, play/pause, stop, and re-tune; or `sinkrill tui "Living Room" --virtual-sink` to start the stream there too |
 | Re-tune | `sinkrill retune` — points the room back at the running stream, e.g. after another device took it |
 | Leftovers | `sinkrill cleanup` — removes the output device and stray capture process after a `kill -9` or crash |
 | Pause / resume | The panel, or the Sonos app; long pauses may drop the stream connection, then restart `sinkrill` (or run with `--keepalive`) |
@@ -372,10 +375,29 @@ when the room is playing an album or playlist rather than this stream. `r`
 points the room back at this stream, the same as `sinkrill retune`. `q`, `Esc`,
 and `Ctrl+C` all leave the panel; the stream keeps running.
 
-The panel talks to the room directly, so it works while `sinkrill` is started
-from another terminal, a service, or with `--no-tune` (then pass
-`--device <ip>`). It never changes the stream itself — formatting, capture, and
-port stay as the running instance set them.
+Bare `sinkrill tui` attaches to the instance that is already running — started
+in another terminal, by a service, or by an older binary. Add a room or any
+stream option and the panel starts the stream itself, exactly as `sinkrill`
+would:
+
+```bash
+sinkrill tui "Living Room" --virtual-sink
+```
+
+That is one command for audio plus controls. Quitting it (`q`) stops the
+stream: the speaker, the capture process, and the virtual device are all
+released before the terminal is handed back. While it runs, the stream's own
+log lines appear in the panel instead of printing over it.
+
+To drive a room that the running instance is not tuned to — say your stream is
+on Den and you want Kitchen to join it — add `--attach`, which starts nothing:
+
+```bash
+sinkrill tui --attach --device "Kitchen"
+```
+
+`r` then re-points Kitchen at the running stream. The panel never changes the
+stream's formatting, capture, or port.
 
 
 ## Run as a user service

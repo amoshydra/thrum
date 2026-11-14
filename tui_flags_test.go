@@ -1,0 +1,125 @@
+package main
+
+import (
+	"flag"
+	"io"
+	"testing"
+)
+
+// tuiFlagSet builds the flag surface `sinkrill tui` parses, the same way
+// runTUI does.
+func tuiFlagSet() (*flag.FlagSet, *startFlags, *bool, *bool) {
+	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	start := &startFlags{}
+	addStartFlags(fs, start)
+	attach := boolVar(fs, nil, "attach", "a", false, "")
+	stream := boolVar(fs, nil, "stream", "", false, "")
+	return fs, start, attach, stream
+}
+
+func TestTUIWantsStream(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    bool
+		wantErr bool
+	}{
+		// Bare `sinkrill tui` controls an instance that is already running.
+		{"bare attaches", nil, false, false},
+		{"verbose alone attaches", []string{"-v"}, false, false},
+		{"port alone attaches to that instance", []string{"--port", "9000"}, false, false},
+		{"explicit attach", []string{"--attach"}, false, false},
+
+		// Anything that names a room or audio starts a stream.
+		{"room starts a stream", []string{"--device", "Den"}, true, false},
+		{"short room flag", []string{"-d", "Den"}, true, false},
+		{"virtual sink starts a stream", []string{"--virtual-sink"}, true, false},
+		{"named virtual sink", []string{"--virtual-sink=kitchen"}, true, false},
+		{"no-tune starts a stream", []string{"--no-tune"}, true, false},
+		{"format starts a stream", []string{"--format", "mp3"}, true, false},
+		{"volume starts a stream", []string{"--volume", "30"}, true, false},
+		{"explicit stream", []string{"--stream"}, true, false},
+
+		{"attach plus stream options is a mistake", []string{"--attach", "--device", "Den"}, false, true},
+		{"attach plus explicit stream is a mistake", []string{"--attach", "--stream"}, false, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fs, _, attach, stream := tuiFlagSet()
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			got, err := tuiWantsStream(fs, *attach, *stream)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("tuiWantsStream = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The report that started this: `sinkrill tui Den --virtual-sink` silently
+// ignored both the room and the flag, because flag parsing stops at the first
+// positional argument. The room shorthand has to be rewritten before parsing.
+func TestTUIRoomArgumentIsRewritten(t *testing.T) {
+	command, args := splitCommand([]string{"tui", "Den", "--virtual-sink"})
+	if command != "tui" {
+		t.Fatalf("command = %q, want tui", command)
+	}
+
+	fs, start, _, _ := tuiFlagSet()
+	if err := fs.Parse(args); err != nil {
+		t.Fatalf("parse %q: %v", args, err)
+	}
+	if start.opts.Device != "Den" {
+		t.Errorf("device = %q, want Den", start.opts.Device)
+	}
+	if !start.virtualSink.set || start.virtualSink.name != "sinkrill" {
+		t.Errorf("virtual sink = %+v, want sinkrill", start.virtualSink)
+	}
+
+	stream := start.stream()
+	if stream.Device != "Den" || stream.VirtualSink != "sinkrill" || !stream.Tune {
+		t.Errorf("stream options = %+v", stream)
+	}
+}
+
+func TestStartRoomArgumentIsRewritten(t *testing.T) {
+	command, args := splitCommand([]string{"Living Room", "--virtual-sink"})
+	if command != "start" {
+		t.Fatalf("command = %q, want start", command)
+	}
+
+	fs, start, _, _ := tuiFlagSet()
+	if err := fs.Parse(args); err != nil {
+		t.Fatalf("parse %q: %v", args, err)
+	}
+	if start.opts.Device != "Living Room" {
+		t.Errorf("device = %q, want Living Room", start.opts.Device)
+	}
+}
+
+// A bare command with no room keeps its flags: the shorthand must not rewrite
+// a leading flag into a room name.
+func TestCommandWithoutRoomIsNotRewritten(t *testing.T) {
+	for _, argv := range [][]string{
+		{"tui", "--virtual-sink"},
+		{"--virtual-sink"},
+		{"tui"},
+	} {
+		command, args := splitCommand(argv)
+		if len(args) > 0 && args[0] != "--virtual-sink" {
+			t.Errorf("splitCommand(%q) = %q, %q; a flag was treated as a room", argv, command, args)
+		}
+	}
+}

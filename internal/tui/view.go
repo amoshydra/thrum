@@ -45,6 +45,9 @@ func render(w io.Writer, m Model, width int) {
 	line("Stream", m.streamLine())
 	line("Capture", m.captureLine())
 	line("Buffer", m.bufferLine())
+	if m.Log != "" {
+		fmt.Fprintf(w, "  %s%s%s %s\n", styleDim, pad("Log", 9), styleReset, clip(m.Log, width-13))
+	}
 
 	fmt.Fprintln(w, styleDim+rule+styleReset)
 

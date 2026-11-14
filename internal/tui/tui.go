@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
 
+	"github.com/amoshydra/sinkrill/internal/logx"
 	"github.com/amoshydra/sinkrill/internal/sink"
 	"github.com/amoshydra/sinkrill/internal/sonos"
 )
@@ -35,10 +38,12 @@ type room interface {
 
 // Options is what the panel needs before it can draw anything.
 type Options struct {
-	Room   string // display name of the room
-	Device string // IP the room answers on
-	Port   int    // port of the local instance
-	Local  *sink.Status
+	Room    string // display name of the room
+	Device  string // IP the room answers on, when known
+	Port    int    // port of the local instance
+	Local   *sink.Status
+	Stream  *sink.Options // non-nil: start this stream in this process
+	Verbose bool
 }
 
 const (
@@ -49,6 +54,11 @@ const (
 
 // Run draws the panel until the user quits or ctx ends. It owns the terminal:
 // raw mode and the alternate screen are both restored on the way out.
+//
+// When Options.Stream is set the panel also runs the stream. That inverts the
+// usual relationship — the panel is normally free to quit at any moment — so
+// shutdown waits for the stream to stop the speaker and remove its virtual
+// sink before the terminal is handed back.
 func Run(ctx context.Context, opts Options) error {
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
@@ -65,12 +75,50 @@ func Run(ctx context.Context, opts Options) error {
 		_ = term.Restore(fd, old)
 	}()
 
-	var speaker room = sonos.NewClient(opts.Device)
 	model := Model{Room: opts.Room, Volume: -1}
 	if opts.Local != nil {
 		model.Local = opts.Local
 		model.Station = opts.Local.Station
 		model.Stream = opts.Local.URI
+	}
+
+	// The stream logs to a writer the panel owns: anything printed straight to
+	// stderr would land on top of the alt screen.
+	var (
+		logs      *logBuffer
+		runCancel context.CancelFunc
+		runErr    <-chan error
+	)
+	if opts.Stream != nil {
+		logs = &logBuffer{}
+		runCtx, cancel := context.WithCancel(ctx)
+		runCancel = cancel
+		done := make(chan error, 1)
+		go func() {
+			done <- sink.Run(runCtx, *opts.Stream, logx.NewTo(logs, opts.Verbose))
+		}()
+		runErr = done
+	}
+
+	redraw := func() {
+		if logs != nil {
+			model.Log = logs.Last()
+		}
+		draw(model)
+	}
+
+	stopStream := func() {
+		if runCancel == nil {
+			return
+		}
+		model.Message, model.Failed = "stopping the stream", false
+		redraw()
+		runCancel()
+		select {
+		case <-runErr:
+		case <-time.After(8 * time.Second):
+		}
+		runCancel, runErr = nil, nil
 	}
 
 	keys := make(chan key, 8)
@@ -81,27 +129,48 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	})
 
+	var speaker room
+	if opts.Device != "" {
+		speaker = sonos.NewClient(opts.Device)
+	}
+
 	snapshots := make(chan snapshot, 1)
 	refresh := make(chan struct{}, 1)
-	go poll(ctx, speaker, opts.Port, snapshots, refresh)
+	go poll(ctx, opts.Device, opts.Port, snapshots, refresh)
 	select {
 	case refresh <- struct{}{}:
 	default:
 	}
 
-	draw(model)
+	redraw()
 	for {
 		select {
 		case <-ctx.Done():
+			stopStream()
 			return nil
+
+		case err := <-runErr:
+			// The stream ended on its own: show why, keep the panel open so
+			// the message can be read, and let the user quit.
+			runErr, runCancel = nil, nil
+			if err != nil {
+				model.Message, model.Failed = "stream stopped: "+shortError(err), true
+			} else {
+				model.Message, model.Failed = "stream stopped", false
+			}
+			redraw()
 
 		case snap := <-snapshots:
 			model.apply(snap)
-			draw(model)
+			if snap.speaker != nil {
+				speaker = snap.speaker
+			}
+			redraw()
 
 		case k := <-keys:
 			act := keyAction(k, model)
 			if act.kind == actQuit {
+				stopStream()
 				return nil
 			}
 			if act.kind == actNone {
@@ -115,9 +184,31 @@ func Run(ctx context.Context, opts Options) error {
 			case refresh <- struct{}{}:
 			default:
 			}
-			draw(model)
+			redraw()
 		}
 	}
+}
+
+// logBuffer keeps the most recent log line so it can be shown inside the panel
+// instead of being printed over it.
+type logBuffer struct {
+	mu   sync.Mutex
+	last string
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if line := strings.TrimRight(string(p), "\n"); line != "" {
+		b.last = line
+	}
+	return len(p), nil
+}
+
+func (b *logBuffer) Last() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.last
 }
 
 // snapshot is one poll of the room and the local instance.
@@ -127,6 +218,7 @@ type snapshot struct {
 	state   string
 	playing string
 	local   *sink.Status
+	speaker room  // the client this poll used, once the room's IP is known
 	err     error // the room did not answer
 }
 
@@ -149,6 +241,15 @@ func (m *Model) apply(s snapshot) {
 	}
 }
 
+func (m *Model) updateLocal(st *sink.Status) {
+	m.Local = st
+	m.Stream = st.URI
+	m.Station = st.Station
+	if m.Room == "" && st.Device != nil {
+		m.Room = fmt.Sprintf("%s (%s)", st.Device.Name, st.Device.IP)
+	}
+}
+
 // shortError drops the SOAP URL that net/http wraps around the actual cause.
 // The URL is the same for every call, so it only pushes the useful part off
 // the end of a narrow terminal.
@@ -160,15 +261,15 @@ func shortError(err error) string {
 	return err.Error()
 }
 
-func (m *Model) updateLocal(st *sink.Status) {
-	m.Local = st
-	m.Stream = st.URI
-	m.Station = st.Station
-}
-
 // poll refreshes the model once a second, and immediately when an action asks
-// for it.
-func poll(ctx context.Context, speaker room, port int, out chan<- snapshot, refresh <-chan struct{}) {
+// for it. The room's IP is only known once the instance advertises, so the
+// client is created on the first poll that learns it.
+func poll(ctx context.Context, ip string, port int, out chan<- snapshot, refresh <-chan struct{}) {
+	var speaker room
+	if ip != "" {
+		speaker = sonos.NewClient(ip)
+	}
+
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
@@ -181,6 +282,13 @@ func poll(ctx context.Context, speaker room, port int, out chan<- snapshot, refr
 		}
 
 		snap := collect(ctx, speaker, port)
+		if snap.local != nil && snap.local.Device != nil && snap.local.Device.IP != ip {
+			ip = snap.local.Device.IP
+			speaker = sonos.NewClient(ip)
+			snap = collect(ctx, speaker, port)
+		}
+		snap.speaker = speaker
+
 		select {
 		case out <- snap:
 		default: // the loop is busy drawing; the next tick will do
@@ -195,6 +303,11 @@ func collect(ctx context.Context, speaker room, port int) snapshot {
 	snap := snapshot{volume: -1}
 	if st, ok := sink.LocalStatus(port); ok {
 		snap.local = st
+	}
+	if speaker == nil {
+		// No room yet: the stream has not advertised, or it was started with
+		// --no-tune.
+		return snap
 	}
 
 	volume, err := speaker.Volume(cctx)
@@ -220,6 +333,10 @@ func collect(ctx context.Context, speaker room, port int) snapshot {
 func runAction(ctx context.Context, speaker room, m Model, a action) (string, bool) {
 	fail := func(what string, err error) (string, bool) {
 		return fmt.Sprintf("%s: %v", what, err), true
+	}
+
+	if speaker == nil {
+		return "no room to control yet", true
 	}
 
 	switch a.kind {

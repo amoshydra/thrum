@@ -355,3 +355,78 @@ func TestShortErrorKeepsTheCause(t *testing.T) {
 		t.Errorf("shortError = %q", got)
 	}
 }
+
+func TestCollectWithoutARoomReadsOnlyTheInstance(t *testing.T) {
+	status := sink.Status{Station: "homedesktop streaming audio", Format: "wav", Bitrate: 1536}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(status)
+	}))
+	defer server.Close()
+
+	// A panel started with --no-tune, or one whose stream has not advertised
+	// yet, has no room to ask. That is not an error.
+	snap := collect(context.Background(), nil, portOf(t, server.URL))
+	if snap.err != nil {
+		t.Fatalf("no room should not be an error: %v", snap.err)
+	}
+	if snap.volume != -1 {
+		t.Errorf("volume = %d, want -1 (unknown)", snap.volume)
+	}
+	if snap.local == nil {
+		t.Error("the local instance should still be reported")
+	}
+}
+
+func TestApplyAdoptsTheRoomOnceItIsKnown(t *testing.T) {
+	status := &sink.Status{
+		Station: "homedesktop streaming audio",
+		URI:     "http://192.168.0.29:8567/stream.wav",
+		Device:  &sink.DeviceStatus{Name: "Den", IP: "192.168.0.188"},
+	}
+
+	m := Model{}
+	m.apply(snapshot{volume: 10, local: status})
+	if m.Room != "Den (192.168.0.188)" {
+		t.Errorf("room = %q, want Den (192.168.0.188)", m.Room)
+	}
+
+	// A room the panel was told about is never replaced by the one in /status.
+	named := Model{Room: "Living Room"}
+	named.apply(snapshot{volume: 10, local: status})
+	if named.Room != "Living Room" {
+		t.Errorf("room = %q, want Living Room", named.Room)
+	}
+}
+
+func TestLogBufferKeepsTheLastLine(t *testing.T) {
+	b := &logBuffer{}
+	if b.Last() != "" {
+		t.Errorf("empty buffer returned %q", b.Last())
+	}
+	_, _ = b.Write([]byte("01:00:00 INFO  created output device\n"))
+	_, _ = b.Write([]byte("01:00:01 INFO  streaming\n"))
+	if got := b.Last(); got != "01:00:01 INFO  streaming" {
+		t.Errorf("Last() = %q", got)
+	}
+}
+
+func TestLogBufferIsSafeForConcurrentUse(t *testing.T) {
+	b := &logBuffer{}
+	done := make(chan struct{})
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			_, _ = b.Write([]byte("01:00:00 INFO  line\n"))
+		}
+		close(done)
+	}()
+
+	for {
+		select {
+		case <-done:
+			return
+		default:
+			_ = b.Last()
+		}
+	}
+}

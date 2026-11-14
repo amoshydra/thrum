@@ -20,6 +20,7 @@ type Model struct {
 	Local   *sink.Status // /status of the local instance, nil when it is not running
 	Message string       // result of the last action, or the last error
 	Failed  bool         // Message is an error
+	Log     string       // most recent stream log line, in stream mode
 }
 
 // stateLabel turns a UPnP transport state into something readable.

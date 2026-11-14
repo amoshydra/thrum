@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -72,18 +73,30 @@ func splitCommand(argv []string) (string, []string) {
 		return "start", nil
 	}
 	switch argv[0] {
-	case "start", "devices", "stop", "volume", "retune", "cleanup", "status", "tui", "probe", "doctor", "version", "help":
-		return argv[0], argv[1:]
 	case "-h", "--help":
 		return "help", nil
 	case "-V", "--version":
 		return "version", nil
+	case "help", "version", "devices", "stop", "volume", "retune", "cleanup",
+		"status", "probe", "doctor":
+		return argv[0], argv[1:]
 	}
-	if strings.HasPrefix(argv[0], "-") {
-		return "start", argv
+
+	command := "start"
+	rest := argv
+	switch argv[0] {
+	case "start", "tui":
+		command, rest = argv[0], argv[1:]
 	}
-	// Shorthand: `sinkrill "Living Room"`.
-	return "start", append([]string{"--device", argv[0]}, argv[1:]...)
+
+	// Shorthand: `sinkrill "Living Room"` and `sinkrill tui "Living Room"`
+	// both name the room. Rewriting it to --device before parsing matters:
+	// otherwise flag.Parse stops at the room and silently drops every flag
+	// after it.
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		rest = append([]string{"--device", rest[0]}, rest[1:]...)
+	}
+	return command, rest
 }
 
 func resolveVersion() {
@@ -112,12 +125,12 @@ Usage:
   sinkrill retune [options]           Point the speaker back at the running stream
   sinkrill cleanup                    Remove a leftover output device after a crash
   sinkrill status                     Show what the running instance is doing
-  sinkrill tui [options]              Control the room from a live panel
+  sinkrill tui [room] [options]       Control the room from a live panel
   sinkrill doctor [options]           Diagnose silence, capture, and routing
   sinkrill probe [options]            Measure buffered latency
   sinkrill version                    Print the version
 
-Options for start:
+Options for start and tui:
   -d, --device <name|ip>    Sonos room name or IP (auto-detected if only one)
   -s, --source <source>     PulseAudio/PipeWire source (default @DEFAULT_MONITOR@)
   -p, --port <port>         HTTP port (default 8567, 0 picks a free one)
@@ -135,6 +148,12 @@ Options for start:
       --station <name>      Name shown on the speaker (default %q)
   -v, --verbose             Verbose logs
 
+Panel:
+  sinkrill tui                        Control the instance that is already running
+  sinkrill tui "Living Room" --virtual-sink
+                                      Start that stream, and show it
+  sinkrill tui --attach -d "Kitchen"  Control another room, starting nothing
+
 Volume:
   sinkrill volume                     Print the current volume
   sinkrill volume 40                  Set it (0-100)
@@ -146,10 +165,19 @@ Run "sinkrill <command> -h" for command-specific options.
 `, sink.DefaultStation())
 }
 
-func runStart(args []string) int {
-	args = normalizeVirtualSink(args)
+// startFlags is the flag surface shared by `sinkrill [room]` and
+// `sinkrill tui [room]`. Defining it once keeps the two commands honest: a
+// flag means the same thing in both, and the panel can start the stream it is
+// watching.
+type startFlags struct {
+	opts        sink.Options
+	virtualSink optionalString
+	noTune      bool
+	verbose     bool
+}
 
-	opts := sink.Options{
+func addStartFlags(fs *flag.FlagSet, o *startFlags) {
+	o.opts = sink.Options{
 		Source:   "@DEFAULT_MONITOR@",
 		Port:     8567,
 		Bitrate:  192,
@@ -162,42 +190,57 @@ func runStart(args []string) int {
 		Station:  sink.DefaultStation(),
 		WarmupMS: 0,
 	}
-	var virtualSink optionalString
-	var noTune bool
+
+	strVar(fs, &o.opts.Device, "device", "d", "", "Sonos room name or IP")
+	strVar(fs, &o.opts.Source, "source", "s", o.opts.Source, "PulseAudio/PipeWire source")
+	intVar(fs, &o.opts.Port, "port", "p", o.opts.Port, "HTTP port (0 = random)")
+	strVar(fs, &o.opts.Format, "format", "f", o.opts.Format, "wav or mp3")
+	intVar(fs, &o.opts.Bitrate, "bitrate", "b", o.opts.Bitrate, "MP3 bitrate in kbps")
+	intVar(fs, &o.opts.WarmupMS, "warmup", "", o.opts.WarmupMS, "replay this much audio to new listeners (ms)")
+	strVar(fs, &o.opts.Host, "host", "", "", "LAN IP advertised to Sonos")
+	strVar(fs, &o.opts.Bind, "bind", "", o.opts.Bind, "HTTP bind address")
+	strVar(fs, &o.opts.FFmpeg, "ffmpeg", "", o.opts.FFmpeg, "ffmpeg binary")
+	strVar(fs, &o.opts.Parec, "parec", "", o.opts.Parec, "parec binary")
+	intVar(fs, &o.opts.Volume, "volume", "", -1, "set speaker volume (0-100)")
+	boolVar(fs, &o.opts.Keepalive, "keepalive", "", false, "re-tune Sonos if it stops")
+	boolVar(fs, &o.noTune, "no-tune", "", false, "only serve the stream")
+	fs.Var(&o.virtualSink, "virtual-sink", "create/use the Sinkrill output device (recommended)")
+	strVar(fs, &o.opts.Station, "station", "", o.opts.Station, "station name shown on the speaker")
+	boolVar(fs, &o.verbose, "verbose", "v", false, "verbose logging")
+}
+
+// stream applies the two flags the flag package cannot express directly.
+func (o *startFlags) stream() sink.Options {
+	out := o.opts
+	if o.noTune {
+		out.Tune = false
+	}
+	if o.virtualSink.set {
+		out.VirtualSink = o.virtualSink.name
+	}
+	return out
+}
+
+func runStart(args []string) int {
+	args = normalizeVirtualSink(args)
 
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
-	strVar(fs, &opts.Device, "device", "d", "", "Sonos room name or IP")
-	strVar(fs, &opts.Source, "source", "s", opts.Source, "PulseAudio/PipeWire source")
-	intVar(fs, &opts.Port, "port", "p", opts.Port, "HTTP port (0 = random)")
-	strVar(fs, &opts.Format, "format", "f", opts.Format, "wav or mp3")
-	intVar(fs, &opts.Bitrate, "bitrate", "b", opts.Bitrate, "MP3 bitrate in kbps")
-	intVar(fs, &opts.WarmupMS, "warmup", "", opts.WarmupMS, "replay this much audio to new listeners (ms)")
-	strVar(fs, &opts.Host, "host", "", "", "LAN IP advertised to Sonos")
-	strVar(fs, &opts.Bind, "bind", "", opts.Bind, "HTTP bind address")
-	strVar(fs, &opts.FFmpeg, "ffmpeg", "", opts.FFmpeg, "ffmpeg binary")
-	strVar(fs, &opts.Parec, "parec", "", opts.Parec, "parec binary")
-	intVar(fs, &opts.Volume, "volume", "", -1, "set speaker volume (0-100)")
-	boolVar(fs, &opts.Keepalive, "keepalive", "", false, "re-tune if the speaker stops")
-	boolVar(fs, &noTune, "no-tune", "", false, "only serve the stream")
-	fs.Var(&virtualSink, "virtual-sink", "create/use the Sinkrill output device (recommended)")
-	strVar(fs, &opts.Station, "station", "", opts.Station, "station name shown on the speaker")
-	verbose := boolVar(fs, nil, "verbose", "v", false, "verbose logging")
+	start := &startFlags{}
+	addStartFlags(fs, start)
 
 	if code, ok := parseFlags(fs, args); !ok {
 		return code
 	}
-	if noTune {
-		opts.Tune = false
-	}
-	if virtualSink.set {
-		opts.VirtualSink = virtualSink.name
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "sinkrill: unexpected argument %q\n", fs.Arg(0))
+		return 2
 	}
 
-	log := logx.New(*verbose)
+	log := logx.New(start.verbose)
 	ctx, stop := signalContext()
 	defer stop()
 
-	if err := sink.Run(ctx, opts, log); err != nil {
+	if err := sink.Run(ctx, start.stream(), log); err != nil {
 		log.Errorf("%v", err)
 		return 1
 	}
@@ -547,36 +590,94 @@ func runCleanup(args []string) int {
 	return 0
 }
 
-// runTUI controls the room and the running instance from a live panel.
+// streamFlags are the flags that name or configure a stream. Any of them turns
+// `sinkrill tui` into "start this stream and show it", so one command line
+// works with or without the panel.
+var streamFlags = []string{
+	"device", "d", "source", "s", "format", "f", "bitrate", "b", "warmup",
+	"host", "bind", "ffmpeg", "parec", "volume", "keepalive", "no-tune",
+	"virtual-sink", "station",
+}
+
+// tuiWantsStream reports whether the invocation asked for a new stream. Bare
+// `sinkrill tui` attaches to whatever is running; anything that names a room or
+// audio starts one.
+func tuiWantsStream(fs *flag.FlagSet, attach, stream bool) (bool, error) {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	wanted := false
+	for _, name := range streamFlags {
+		if set[name] {
+			wanted = true
+			break
+		}
+	}
+
+	switch {
+	case attach && (wanted || stream):
+		return false, errors.New("--attach controls a running stream and cannot be combined with stream options")
+	case attach:
+		return false, nil
+	case stream:
+		return true, nil
+	}
+	return wanted, nil
+}
+
+// runTUI controls a room from a live panel. With no stream options it attaches
+// to the instance already running; with any, it starts the stream first.
 func runTUI(args []string) int {
+	args = normalizeVirtualSink(args)
+
 	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
-	device := ""
-	port := 8567
-	strVar(fs, &device, "device", "d", "", "Sonos room name or IP")
-	intVar(fs, &port, "port", "p", port, "port of the running instance")
-	verbose := boolVar(fs, nil, "verbose", "v", false, "verbose logging")
+	start := &startFlags{}
+	addStartFlags(fs, start)
+	attach := boolVar(fs, nil, "attach", "a", false, "control a running stream instead of starting one")
+	stream := boolVar(fs, nil, "stream", "", false, "start a stream with these options")
 
 	if code, ok := parseFlags(fs, args); !ok {
 		return code
 	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "sinkrill tui: unexpected argument %q\n", fs.Arg(0))
+		return 2
+	}
 
-	log := logx.New(*verbose)
+	log := logx.New(start.verbose)
+	withStream, err := tuiWantsStream(fs, *attach, *stream)
+	if err != nil {
+		log.Errorf("%v", err)
+		return 2
+	}
+
 	ctx, stop := signalContext()
 	defer stop()
 
-	dev, err := resolveTarget(ctx, device, port, log)
-	if err != nil {
-		log.Errorf("%v", err)
-		return 1
+	plan := tui.Options{Port: start.opts.Port, Verbose: start.verbose}
+
+	if withStream {
+		opts := start.stream()
+		if opts.Port == 0 {
+			log.Errorf("the panel needs a fixed --port; port 0 picks one it cannot find")
+			return 2
+		}
+		if st, ok := localStatus(opts.Port); ok {
+			log.Errorf("a sinkrill instance is already running on port %d (%q); use `sinkrill tui` to control it, or --port for another", opts.Port, st.Station)
+			return 1
+		}
+		plan.Stream = &opts
+	} else {
+		dev, err := resolveTarget(ctx, start.opts.Device, start.opts.Port, log)
+		if err != nil {
+			log.Errorf("%v", err)
+			return 1
+		}
+		plan.Room, plan.Device = dev.Name, dev.IP
+		plan.Local, _ = localStatus(start.opts.Port)
 	}
 
-	local, _ := localStatus(port)
-	if err := tui.Run(ctx, tui.Options{
-		Room:   dev.Name,
-		Device: dev.IP,
-		Port:   port,
-		Local:  local,
-	}); err != nil {
+	if err := tui.Run(ctx, plan); err != nil {
 		log.Errorf("%v", err)
 		return 1
 	}
