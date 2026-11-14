@@ -1,6 +1,6 @@
 # Maintainer: Amos Hydra <https://github.com/amoshydra>
 pkgname=sinkrill
-pkgver=0.3.0
+pkgver=0.3.1
 pkgrel=1
 pkgdesc="Stream this computer's audio to Sonos speakers over the LAN"
 arch=('x86_64' 'aarch64')
@@ -10,7 +10,7 @@ depends=('libpulse')
 optdepends=('ffmpeg: MP3 streaming mode')
 makedepends=('go')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('5131c7ec6dd623bd029394c9fed2fd95537ca0e7a9e187f5eff05acd61ca921b')
+sha256sums=('7cb616d4e7157c2430a13718ee95fcdc510e34d72b4e86d86559edc3122f9dd0')
 
 build() {
 	cd "$pkgname-$pkgver"
