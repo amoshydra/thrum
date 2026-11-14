@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1](https://github.com/amoshydra/sinkrill/compare/v0.3.0...v0.3.1) (2026-11-14)
+
+
+### Features
+
+* add `sinkrill cleanup` for what a hard kill leaves behind ([2a4b299](https://github.com/amoshydra/sinkrill/commit/2a4b2991dbf9d4c2f6224f6ffc2fb3fdb4ba161e))
+* add `sinkrill tui`, a live control panel ([8a41408](https://github.com/amoshydra/sinkrill/commit/8a41408d339c59553a22c2cd6b68aae5be2d1c50))
+
 ## [0.3.0](https://github.com/amoshydra/sinkrill/compare/v0.2.1...v0.3.0) (2026-11-09)
 
 
